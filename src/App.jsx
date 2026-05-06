@@ -34,7 +34,27 @@ function loadData() {
     return raw ? { ...initialData, ...JSON.parse(raw) } : initialData;
   } catch { return initialData; }
 }
-function saveData(d) { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
+function saveData(d) {
+  const json = JSON.stringify(d);
+  localStorage.setItem(STORAGE_KEY, json);
+  // Cloud sync via window.storage (works across devices when using the artifact)
+  try {
+    if (window.storage) {
+      window.storage.set(STORAGE_KEY, json).catch(()=>{});
+    }
+  } catch(_) {}
+}
+async function loadCloudData() {
+  try {
+    if (window.storage) {
+      const res = await window.storage.get(STORAGE_KEY);
+      if (res && res.value) {
+        return { ...initialData, ...JSON.parse(res.value) };
+      }
+    }
+  } catch(_) {}
+  return null;
+}
 
 function formatDuration(ms) {
   const s = Math.floor(ms/1000), h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
@@ -180,15 +200,24 @@ function InvoiceModal({ items, onClose, events }) {
   }
 
   function downloadHTML() {
-    const blob = new Blob([buildHtml()], { type: "text/html;charset=utf-8" });
+    const html = buildHtml();
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `Rechnung-${invoiceNr}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+
+    // iPhone Safari: window.open works better than <a download>
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    if (isIOS) {
+      // Open in same tab so Safari shows share sheet with "Save to Files" / AirDrop / Mail
+      window.location.href = url;
+    } else {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Rechnung-${invoiceNr}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
   }
 
   function sendEmail() {
@@ -204,7 +233,8 @@ function InvoiceModal({ items, onClose, events }) {
       `Mit künstlerischen Grüßen,\n${FIRMA.kuenstler}\n${FIRMA.name}\n${FIRMA.email}\n${FIRMA.web}`
     );
     const to = customer.email ? encodeURIComponent(customer.email) : "";
-    window.location.href = `mailto:${to}?subject=${subject}&body=${body}`;
+    // Use open() so we don't lose the app state on iOS
+    window.open(`mailto:${to}?subject=${subject}&body=${body}`, "_self");
   }
 
   return (
@@ -249,9 +279,14 @@ function InvoiceModal({ items, onClose, events }) {
             <div style={{color:C.grey}}>{nextEvent.type} · {formatDate(nextEvent.date+"T00:00:00")}</div>
           </div>
         )}
-        <button onClick={printInvoice} style={{...mkBtn(),width:"100%",padding:"14px",fontSize:14,letterSpacing:2}}>
-          Rechnung drucken / Als PDF speichern
-        </button>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <button onClick={downloadHTML} style={{...mkBtn(),width:"100%",padding:"13px",fontSize:13,letterSpacing:1}}>
+            ⬇️ Rechnung herunterladen
+          </button>
+          <button onClick={sendEmail} style={{...mkBtn(C.green),width:"100%",padding:"13px",fontSize:13,letterSpacing:1}}>
+            ✉️ Per E-Mail senden
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -510,6 +545,7 @@ export default function AtelierTracker() {
   const [invoiceItems, setInvoiceItems] = useState(null);
 
   // Timer
+  const [syncStatus, setSyncStatus] = useState("...");
   const [timerState, setTimerState] = useState("stopped");
   const [startTime, setStartTime]   = useState(null);
   const [elapsed, setElapsed]       = useState(0);
@@ -524,7 +560,28 @@ export default function AtelierTracker() {
   const [incForm, setIncForm] = useState({ art:"Original Gemälde", description:"", price:"", qty:"1", note:"", date:today() });
   const [incErr,  setIncErr]  = useState("");
 
+  // Sync to cloud on every data change
   useEffect(()=>{ saveData(data); },[data]);
+
+  // On mount: try loading from cloud (may have fresher data than localStorage)
+  useEffect(()=>{
+    loadCloudData().then(cloudData => {
+      if (cloudData) {
+        // Use cloud data if it has more entries total
+        const localCount = data.sessions.length + data.expenses.length + data.incomes.length + (data.events||[]).length;
+        const cloudCount = cloudData.sessions.length + cloudData.expenses.length + cloudData.incomes.length + (cloudData.events||[]).length;
+        if (cloudCount >= localCount) {
+          setData(cloudData);
+          setSyncStatus("☁️ Daten synchronisiert");
+        } else {
+          setSyncStatus("☁️ Lokale Daten aktuell");
+        }
+      } else {
+        setSyncStatus("📱 Lokal gespeichert");
+      }
+    });
+  // eslint-disable-next-line
+  },[]);
   useEffect(()=>{
     if(timerState==="running"){ timerRef.current=setInterval(()=>setElapsed(Date.now()-startTime-totalPaused),1000);}
     else clearInterval(timerRef.current);
@@ -595,6 +652,7 @@ export default function AtelierTracker() {
             <div style={{fontSize:11,letterSpacing:4,color:C.purpleLt,textTransform:"uppercase",marginBottom:3}}>{FIRMA.atelier}</div>
             <h1 style={{margin:"0 0 4px",fontSize:24,fontWeight:"normal",letterSpacing:1}}>{FIRMA.name}</h1>
             <div style={{fontSize:11,color:"#ffffff88",letterSpacing:0.3}}>{FIRMA.kuenstler} · {FIRMA.adresse}, {FIRMA.plzOrt} · {FIRMA.email}</div>
+            <div style={{fontSize:10,color:C.purpleLt,marginTop:3,letterSpacing:0.5}}>{syncStatus}</div>
           </div>
         </div>
       </div>
